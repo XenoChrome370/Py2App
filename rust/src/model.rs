@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
@@ -287,6 +287,89 @@ pub fn bundle_identifier(display: &str) -> String {
     format!("dev.packager.{}", executable_slug(display))
 }
 
+pub(crate) fn is_project_marker(name: &str) -> bool {
+    matches!(
+        name,
+        "Cargo.toml"
+            | "go.mod"
+            | "Package.swift"
+            | "build.zig"
+            | "pubspec.yaml"
+            | "package.json"
+            | "pyproject.toml"
+            | "setup.py"
+            | "setup.cfg"
+            | "requirements.txt"
+            | "Pipfile"
+            | "Pipfile.lock"
+            | "Gemfile"
+            | "composer.json"
+            | "CMakeLists.txt"
+            | "Makefile"
+            | "makefile"
+            | "GNUmakefile"
+            | "pom.xml"
+            | "build.gradle"
+            | "build.gradle.kts"
+            | "tsconfig.json"
+    )
+}
+
+fn generic_stem(stem: &str) -> bool {
+    matches!(
+        stem.to_ascii_lowercase().as_str(),
+        "main" | "index" | "app" | "__main__"
+    )
+}
+
+fn directory_name(path: &Path) -> String {
+    path.file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string()
+}
+
+/// Name to show before the user has typed one.
+/// Generic entry files such as `main.py` take the project folder's name.
+fn entry_is_file(path: &Path) -> bool {
+    if path.is_file() {
+        return true;
+    }
+    if path.is_dir() {
+        return false;
+    }
+    path.extension().is_some()
+}
+
+pub fn suggested_name(detection: &Detection) -> String {
+    let raw = if entry_is_file(&detection.entry) {
+        let stem = detection
+            .entry
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        let file_name = detection
+            .entry
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy();
+        if generic_stem(&stem) || is_project_marker(&file_name) {
+            directory_name(&detection.project_root)
+        } else {
+            stem
+        }
+    } else {
+        directory_name(&detection.project_root)
+    };
+    let cleaned = clean_display_name(&raw);
+    if cleaned.is_empty() {
+        "App".to_string()
+    } else {
+        cleaned
+    }
+}
+
 pub fn display_name(request: &BuildRequest, detection: &Detection) -> String {
     if let Some(name) = &request.name {
         let cleaned = clean_display_name(name);
@@ -334,5 +417,24 @@ mod tests {
         assert_eq!(executable_slug("Hello World"), "hello-world");
         assert_eq!(clean_display_name("  Hello   World!! "), "Hello World");
         assert_eq!(bundle_identifier("Hello"), "dev.packager.hello");
+    }
+
+    #[test]
+    fn suggests_the_folder_for_a_generic_entry() {
+        let detection = Detection {
+            language: Language::Python,
+            entry: PathBuf::from("/tmp/demo/main.py"),
+            project_root: PathBuf::from("/tmp/demo"),
+            reason: String::new(),
+        };
+        assert_eq!(suggested_name(&detection), "demo");
+
+        let named = Detection {
+            language: Language::Python,
+            entry: PathBuf::from("/tmp/demo/hello.py"),
+            project_root: PathBuf::from("/tmp/demo"),
+            reason: String::new(),
+        };
+        assert_eq!(suggested_name(&named), "hello");
     }
 }

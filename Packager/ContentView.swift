@@ -146,7 +146,7 @@ struct ContentView: View {
                 }
                 if let tool = session.activeToolchain {
                     Label {
-                        Text(tool.available ? tool.detail : tool.detail)
+                        Text(tool.detail)
                             .font(.caption)
                             .foregroundStyle(tool.available ? Color.secondary : Color.orange)
                     } icon: {
@@ -160,6 +160,9 @@ struct ContentView: View {
                 if session.loading {
                     ProgressView()
                         .controlSize(.small)
+                } else if let toolchainError = session.toolchainError {
+                    Text(toolchainError)
+                        .foregroundStyle(.orange)
                 } else if session.engineMissing {
                     Text("The Rust packaging engine is missing from this app.")
                         .foregroundStyle(.orange)
@@ -261,10 +264,14 @@ struct ContentView: View {
             }
             guard let url else { return }
             Task { @MainActor in
-                session.sourcePath = url.path
+                let path = url.path
+                let changed = session.sourcePath != path
+                session.sourcePath = path
                 session.nameTouched = false
                 session.persist()
-                session.scheduleDetect()
+                if !changed {
+                    session.scheduleDetect()
+                }
             }
         }
         return true

@@ -21,13 +21,14 @@ struct DetectResult: Decodable {
     let ok: Bool
     let language: String?
     let label: String?
+    let name: String?
     let reason: String?
     let entry: String?
     let projectRoot: String?
     let error: String?
 
     enum CodingKeys: String, CodingKey {
-        case ok, language, label, reason, entry, error
+        case ok, language, label, name, reason, entry, error
         case projectRoot = "project_root"
     }
 }
@@ -67,9 +68,11 @@ final class BuildSession: ObservableObject {
     @Published var engineMissing = false
     @Published var banner: StatusBanner?
     @Published var nameTouched = false
+    @Published var toolchainError: String?
 
     private var environment: [String: String] = ProcessInfo.processInfo.environment
     private var detectTask: Task<Void, Never>?
+    private var detectGeneration = 0
     private var runningProcess: RunningProcess?
     private var pendingLog = ""
     private var suppressNameEdit = false
@@ -130,8 +133,9 @@ final class BuildSession: ObservableObject {
                let decoded = try? JSONDecoder().decode(ToolsEnvelope.self, from: data) {
                 tools = decoded.tools
             }
+            toolchainError = nil
         } catch {
-            detectError = error.localizedDescription
+            toolchainError = error.localizedDescription
         }
     }
 
@@ -143,11 +147,13 @@ final class BuildSession: ObservableObject {
             detectError = nil
             return
         }
+        detectGeneration += 1
+        let generation = detectGeneration
         let language = language
         detectTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 200_000_000)
             guard !Task.isCancelled else { return }
-            await self?.detect(path: path, language: language)
+            await self?.detect(path: path, language: language, generation: generation)
         }
     }
 
@@ -180,10 +186,14 @@ final class BuildSession: ObservableObject {
         panel.message = "Choose a source file or a project folder"
         panel.prompt = "Choose"
         if panel.runModal() == .OK, let url = panel.url {
-            sourcePath = url.path
+            let path = url.path
+            let changed = sourcePath != path
+            sourcePath = path
             nameTouched = false
             persist()
-            scheduleDetect()
+            if !changed {
+                scheduleDetect()
+            }
         }
     }
 
@@ -299,7 +309,7 @@ final class BuildSession: ObservableObject {
 
     private var latestEvent: BuildEvent?
 
-    private func detect(path: String, language: String) async {
+    private func detect(path: String, language: String, generation: Int) async {
         guard !engineMissing else { return }
         var arguments = ["detect", path]
         if language != "auto" {
@@ -310,6 +320,7 @@ final class BuildSession: ObservableObject {
                 arguments: arguments,
                 environment: environment
             )
+            guard generation == detectGeneration else { return }
             guard let data = text.data(using: .utf8),
                   let result = try? JSONDecoder().decode(DetectResult.self, from: data) else {
                 detection = nil
@@ -325,22 +336,14 @@ final class BuildSession: ObservableObject {
                 detectError = result.error
             }
         } catch {
+            guard generation == detectGeneration else { return }
             detectError = error.localizedDescription
         }
     }
 
     private func applyName(from result: DetectResult) {
         guard !nameTouched else { return }
-        let entry = result.entry ?? sourcePath
-        var name = URL(fileURLWithPath: entry).deletingPathExtension().lastPathComponent
-        let markers = [
-            "Cargo", "package", "Package", "go", "pom", "pubspec", "Makefile",
-            "makefile", "CMakeLists", "build", "requirements", "setup", "tsconfig"
-        ]
-        if markers.contains(name) {
-            name = URL(fileURLWithPath: result.projectRoot ?? sourcePath).lastPathComponent
-        }
-        guard !name.isEmpty, name != appName else { return }
+        guard let name = result.name, !name.isEmpty, name != appName else { return }
         suppressNameEdit = true
         appName = name
         persist()

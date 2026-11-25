@@ -33,7 +33,7 @@ fn dispatch() -> packager::Result<u8> {
             Ok(0)
         }
         Some("--version") | Some("-V") => {
-            println!("packager 1.0.0");
+            println!("packager {VERSION}");
             Ok(0)
         }
         Some("languages") => {
@@ -87,6 +87,7 @@ fn detect_command(args: impl Iterator<Item = String>) -> packager::Result<u8> {
                 "ok": true,
                 "language": detection.language.id(),
                 "label": detection.language.label(),
+                "name": packager::suggested_name(&detection),
                 "reason": detection.reason,
                 "entry": detection.entry.display().to_string(),
                 "project_root": detection.project_root.display().to_string(),
@@ -198,9 +199,11 @@ fn parse_language(value: &str) -> packager::Result<Language> {
     })
 }
 
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 fn print_help() {
     println!(
-        r#"packager 1.0.0
+        "packager {VERSION}
 Package a project into a macOS app or a command-line tool.
 
 Usage:
@@ -215,7 +218,7 @@ Options:
   --mode app|tool   app is the default
   --icon <file>     .icns or .png icon
 
-The Swift app and this command package projects on the computer they run on."#
+The Swift app and this command package projects on the computer they run on."
     );
 }
 

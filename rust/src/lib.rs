@@ -10,7 +10,8 @@ mod product;
 
 pub use error::{PackagerError, Result};
 pub use model::{
-    BuildOutcome, BuildRequest, Detection, Language, LanguageInfo, OutputMode, Toolchain,
+    suggested_name, BuildOutcome, BuildRequest, Detection, Language, LanguageInfo, OutputMode,
+    Toolchain,
 };
 pub use process::{active_child_pgid, Log, StdoutLog};
 

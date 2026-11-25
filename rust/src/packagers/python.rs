@@ -70,14 +70,14 @@ pub fn build(
             &setup_path,
             &render_setup(&script, display, request.icon.as_deref(), root)?,
         )?;
-        let before = fsutil::snapshot_names(&request.output_dir);
+        let dist = temp.path().join("dist");
         process::run_ok(
             &python,
             &[
                 setup_path.display().to_string(),
                 "py2app".into(),
                 "--dist-dir".into(),
-                request.output_dir.display().to_string(),
+                dist.display().to_string(),
                 "--bdist-base".into(),
                 temp.path().join("bdist").display().to_string(),
             ],
@@ -85,13 +85,15 @@ pub fn build(
             &[("PYTHONPATH", pythonpath.as_str())],
             log,
         )?;
-        let app = find_new_app(&request.output_dir, &before, display)?;
+        let app = find_new_app(&dist, &std::collections::HashSet::new(), display)?;
+        let placed =
+            product::place_path(&app, &request.output_dir, &format!("{display}.app"), log)?;
         log.line(
             "py2app wrote the app into the output folder. The project itself was left unchanged.",
         );
         return Ok(super::outcome(
             Language::Python,
-            vec![app],
+            vec![placed],
             "py2app",
             vec!["The app includes a Python runtime.".into()],
         ));
@@ -142,11 +144,8 @@ pub fn build(
                     app.display()
                 )));
             }
-            let dest = request.output_dir.join(format!("{display}.app"));
-            if dest.exists() {
-                fs::remove_dir_all(&dest)?;
-            }
-            fsutil::copy_tree(&app, &dest)?;
+            let dest =
+                product::place_path(&app, &request.output_dir, &format!("{display}.app"), log)?;
             return Ok(super::outcome(
                 Language::Python,
                 vec![dest],
@@ -155,10 +154,10 @@ pub fn build(
             ));
         }
         let binary = dist.join(&name);
-        let artifacts = product::deliver_binary(&binary, request, display, log)?;
-        return Ok(super::outcome(
+        let delivered = product::deliver_binary(&binary, request, display, log)?;
+        return Ok(super::finish(
             Language::Python,
-            artifacts,
+            delivered,
             "PyInstaller",
             vec!["The tool includes a Python runtime.".into()],
         ));
@@ -179,7 +178,7 @@ fn python_script(detection: &Detection) -> Result<PathBuf> {
         return Ok(detection.entry.clone());
     }
     Err(PackagerError::msg(
-        "choose the Python file that should start the app".to_string(),
+        "choose the Python file that should start the app",
     ))
 }
 
@@ -278,9 +277,9 @@ fn find_new_app(
             }
         }
     }
-    created.pop().ok_or_else(|| {
-        PackagerError::msg("py2app finished without writing an .app bundle".to_string())
-    })
+    created
+        .pop()
+        .ok_or_else(|| PackagerError::msg("py2app finished without writing an .app bundle"))
 }
 
 #[cfg(test)]

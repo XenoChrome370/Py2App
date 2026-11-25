@@ -1,17 +1,38 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{PackagerError, Result};
 use crate::fsutil::{self, TempDir};
 use crate::model::{bundle_identifier, executable_slug, BuildRequest, OutputMode};
 use crate::process::{self, Log};
 
+static UNIQUE_FALLBACK: AtomicU64 = AtomicU64::new(0);
+
+pub struct Delivery {
+    pub artifacts: Vec<PathBuf>,
+    pub notes: Vec<String>,
+}
+
+/// Shell fragment that puts Homebrew, user toolchains, and Python installs
+/// ahead of the minimal PATH a Finder-launched app receives.
+pub fn shell_path_setup() -> &'static str {
+    r#"py_bins=""
+for dir in "${HOME:-}"/Library/Python/*/bin /Library/Frameworks/Python.framework/Versions/*/bin; do
+  if [ -d "$dir" ]; then
+    py_bins="${py_bins:+$py_bins:}$dir"
+  fi
+done
+PATH="${HOME:-}/.cargo/bin:${HOME:-}/go/bin:${HOME:-}/.local/bin:${HOME:-}/.bun/bin:${HOME:-}/.dotnet:${HOME:-}/.dotnet/tools:/opt/homebrew/bin:/usr/local/bin${py_bins:+:$py_bins}:${PATH:-/usr/bin:/bin}"
+export PATH"#
+}
+
 pub fn deliver_binary(
     binary: &Path,
     request: &BuildRequest,
     display: &str,
     log: &mut dyn Log,
-) -> Result<Vec<PathBuf>> {
+) -> Result<Delivery> {
     if !binary.is_file() {
         return Err(PackagerError::msg(format!(
             "build finished without an executable at {}",
@@ -26,7 +47,11 @@ pub fn deliver_binary(
             fsutil::copy_file(binary, &dest)?;
             fsutil::make_executable(&dest)?;
             log.line(&format!("tool {}", dest.display()));
-            Ok(vec![dest])
+            sign_product(&dest, log);
+            Ok(Delivery {
+                artifacts: vec![dest],
+                notes: Vec::new(),
+            })
         }
         OutputMode::App => wrap_binary(binary, request, display, &slug, log),
     }
@@ -38,7 +63,7 @@ pub fn deliver_script(
     request: &BuildRequest,
     display: &str,
     log: &mut dyn Log,
-) -> Result<Vec<PathBuf>> {
+) -> Result<Delivery> {
     let staging = TempDir::new("packager-script")?;
     let file_name = fsutil::file_name(source);
     let staged = staging.path().join(&file_name);
@@ -57,10 +82,14 @@ pub fn deliver_script(
             fsutil::write_file(&launcher, &launcher_script(interpreter, ".", &file_name))?;
             fsutil::make_executable(&launcher)?;
             log.line(&format!("tool {}", launcher.display()));
-            Ok(vec![launcher])
+            sign_product(&launcher, log);
+            Ok(Delivery {
+                artifacts: vec![launcher],
+                notes: Vec::new(),
+            })
         }
         OutputMode::App => {
-            let app = prepare_app_bundle(
+            let (app, notes) = prepare_app_bundle(
                 &request.output_dir,
                 display,
                 &slug,
@@ -79,7 +108,11 @@ pub fn deliver_script(
             )?;
             fsutil::make_executable(&launcher)?;
             log.line(&format!("app {}", app.display()));
-            Ok(vec![app])
+            sign_product(&app, log);
+            Ok(Delivery {
+                artifacts: vec![app],
+                notes,
+            })
         }
     }
 }
@@ -90,7 +123,7 @@ pub fn deliver_tree(
     request: &BuildRequest,
     display: &str,
     log: &mut dyn Log,
-) -> Result<Vec<PathBuf>> {
+) -> Result<Delivery> {
     if !payload.is_dir() {
         return Err(PackagerError::msg(format!(
             "missing build output {}",
@@ -109,10 +142,14 @@ pub fn deliver_tree(
                 fsutil::make_executable(&exe)?;
             }
             log.line(&format!("tool {}", exe.display()));
-            Ok(vec![exe])
+            sign_product(&exe, log);
+            Ok(Delivery {
+                artifacts: vec![exe],
+                notes: Vec::new(),
+            })
         }
         OutputMode::App => {
-            let app = prepare_app_bundle(
+            let (app, notes) = prepare_app_bundle(
                 &request.output_dir,
                 display,
                 &slug,
@@ -133,9 +170,35 @@ pub fn deliver_tree(
             )?;
             fsutil::make_executable(&launcher)?;
             log.line(&format!("app {}", app.display()));
-            Ok(vec![app])
+            sign_product(&app, log);
+            Ok(Delivery {
+                artifacts: vec![app],
+                notes,
+            })
         }
     }
+}
+
+/// Move a finished app or tool to a free name in the output folder.
+/// An existing product at that name is left where it is.
+pub fn place_path(
+    from: &Path,
+    output_dir: &Path,
+    name: &str,
+    log: &mut dyn Log,
+) -> Result<PathBuf> {
+    fs::create_dir_all(output_dir)?;
+    let dest = unique_path(&output_dir.join(name));
+    if from.is_dir() {
+        fsutil::copy_tree(from, &dest)?;
+    } else {
+        fsutil::copy_file(from, &dest)?;
+        if fsutil::is_executable(from) {
+            fsutil::make_executable(&dest)?;
+        }
+    }
+    sign_product(&dest, log);
+    Ok(dest)
 }
 
 fn wrap_binary(
@@ -144,8 +207,8 @@ fn wrap_binary(
     display: &str,
     slug: &str,
     log: &mut dyn Log,
-) -> Result<Vec<PathBuf>> {
-    let app = prepare_app_bundle(
+) -> Result<Delivery> {
+    let (app, notes) = prepare_app_bundle(
         &request.output_dir,
         display,
         slug,
@@ -156,7 +219,11 @@ fn wrap_binary(
     fsutil::copy_file(binary, &dest)?;
     fsutil::make_executable(&dest)?;
     log.line(&format!("app {}", app.display()));
-    Ok(vec![app])
+    sign_product(&app, log);
+    Ok(Delivery {
+        artifacts: vec![app],
+        notes,
+    })
 }
 
 fn prepare_app_bundle(
@@ -165,7 +232,7 @@ fn prepare_app_bundle(
     slug: &str,
     icon: Option<&Path>,
     log: &mut dyn Log,
-) -> Result<PathBuf> {
+) -> Result<(PathBuf, Vec<String>)> {
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (output_dir, display, slug, icon, log);
@@ -176,18 +243,16 @@ fn prepare_app_bundle(
     #[cfg(target_os = "macos")]
     {
         let app = unique_path(&output_dir.join(format!("{display}.app")));
-        if app.exists() {
-            fs::remove_dir_all(&app)?;
-        }
         let macos = app.join("Contents/MacOS");
         let resources = app.join("Contents/Resources");
         fs::create_dir_all(&macos)?;
         fs::create_dir_all(&resources)?;
-        let has_icon = install_icon(&resources, icon, log)?;
+        let notes = install_icon(&resources, icon, log)?;
+        let has_icon = resources.join("AppIcon.icns").is_file();
         let plist = render_plist(display, slug, &bundle_identifier(display), has_icon);
         fsutil::write_file(&app.join("Contents/Info.plist"), &plist)?;
         fsutil::write_file(&app.join("Contents/PkgInfo"), "APPL????")?;
-        Ok(app)
+        Ok((app, notes))
     }
 }
 
@@ -197,8 +262,9 @@ fn launcher_script(interpreter: Option<&str>, root_expr: &str, relative: &str) -
         Some(program) => format!("exec /usr/bin/env {program} \"$ROOT\"/{quoted} \"$@\""),
         None => format!("exec \"$ROOT\"/{quoted} \"$@\""),
     };
+    let path_setup = shell_path_setup();
     format!(
-        "#!/bin/bash\nset -euo pipefail\nHERE=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\nROOT=\"$(cd \"$HERE/{root_expr}\" && pwd)\"\ncd \"$ROOT\"\n{exec_line}\n"
+        "#!/bin/bash\nset -euo pipefail\n{path_setup}\nHERE=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\nROOT=\"$(cd \"$HERE/{root_expr}\" && pwd)\"\ncd \"$ROOT\"\n{exec_line}\n"
     )
 }
 
@@ -249,9 +315,9 @@ fn xml_escape(value: &str) -> String {
         .replace('>', "&gt;")
 }
 
-fn install_icon(resources: &Path, icon: Option<&Path>, log: &mut dyn Log) -> Result<bool> {
+fn install_icon(resources: &Path, icon: Option<&Path>, log: &mut dyn Log) -> Result<Vec<String>> {
     let Some(icon) = icon else {
-        return Ok(false);
+        return Ok(Vec::new());
     };
     if !icon.is_file() {
         return Err(PackagerError::msg(format!(
@@ -263,25 +329,20 @@ fn install_icon(resources: &Path, icon: Option<&Path>, log: &mut dyn Log) -> Res
     match fsutil::extension_of(icon).as_deref() {
         Some("icns") => {
             fsutil::copy_file(icon, &dest)?;
-            Ok(true)
+            Ok(Vec::new())
         }
         Some("png") | Some("jpg") | Some("jpeg") | Some("tiff") | Some("tif") => {
-            match raster_to_icns(icon, &dest, log) {
-                Ok(()) => Ok(true),
-                Err(err) => {
-                    log.line(&format!("icon skipped: {err}"));
-                    Ok(false)
-                }
+            log.line(&format!("converting icon {}", fsutil::file_name(icon)));
+            match raster_to_icns(icon, &dest) {
+                Ok(()) => Ok(Vec::new()),
+                Err(err) => Ok(vec![format!("icon skipped: {err}")]),
             }
         }
-        _ => {
-            log.line("icon skipped: use a .icns or .png file");
-            Ok(false)
-        }
+        _ => Ok(vec!["icon skipped: use a .icns or .png file".to_string()]),
     }
 }
 
-fn raster_to_icns(src: &Path, dest: &Path, log: &mut dyn Log) -> Result<()> {
+fn raster_to_icns(src: &Path, dest: &Path) -> Result<()> {
     let sips = fsutil::require_tool(&["sips"], "sips is required to convert an icon")?;
     let iconutil = fsutil::require_tool(&["iconutil"], "iconutil is required to convert an icon")?;
     let temp = TempDir::new("packager-icon")?;
@@ -299,7 +360,7 @@ fn raster_to_icns(src: &Path, dest: &Path, log: &mut dyn Log) -> Result<()> {
         (512, "icon_512x512.png"),
         (1024, "icon_512x512@2x.png"),
     ] {
-        process::run_ok(
+        process::run_silent(
             &sips,
             &[
                 "-z".to_string(),
@@ -311,10 +372,9 @@ fn raster_to_icns(src: &Path, dest: &Path, log: &mut dyn Log) -> Result<()> {
             ],
             None,
             &[],
-            log,
         )?;
     }
-    process::run_ok(
+    process::run_silent(
         &iconutil,
         &[
             "-c".to_string(),
@@ -325,7 +385,6 @@ fn raster_to_icns(src: &Path, dest: &Path, log: &mut dyn Log) -> Result<()> {
         ],
         None,
         &[],
-        log,
     )?;
     Ok(())
 }
@@ -346,7 +405,50 @@ fn unique_path(path: &Path) -> PathBuf {
             return candidate;
         }
     }
-    parent.join(format!("{stem}-built{ext}"))
+    let n = UNIQUE_FALLBACK.fetch_add(1, Ordering::Relaxed);
+    parent.join(format!("{stem}-{}-{n}{ext}", std::process::id()))
+}
+
+fn sign_product(path: &Path, log: &mut dyn Log) {
+    #[cfg(target_os = "macos")]
+    {
+        let Some(codesign) = fsutil::find_tool(&["codesign"]) else {
+            log.line("code signing skipped: codesign is not available");
+            return;
+        };
+        if path.extension().and_then(|ext| ext.to_str()) == Some("app") {
+            let macos = path.join("Contents/MacOS");
+            if let Ok(read) = fs::read_dir(&macos) {
+                for entry in read.flatten() {
+                    let exe = entry.path();
+                    if exe.is_file() {
+                        sign_file(&codesign, &exe, log);
+                    }
+                }
+            }
+            for exe in fsutil::executables_under(&path.join("Contents/Resources/payload"), 4) {
+                sign_file(&codesign, &exe, log);
+            }
+        }
+        sign_file(&codesign, path, log);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (path, log);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn sign_file(codesign: &Path, path: &Path, log: &mut dyn Log) {
+    let args = vec![
+        "--force".to_string(),
+        "--sign".to_string(),
+        "-".to_string(),
+        path.display().to_string(),
+    ];
+    if let Err(err) = process::run_silent(codesign, &args, None, &[]) {
+        log.line(&format!("code signing skipped: {err}"));
+    }
 }
 
 #[cfg(test)]
@@ -376,8 +478,8 @@ mod tests {
             icon: None,
         };
         let mut log = CaptureLog;
-        let artifacts = deliver_script(&script, None, &request, "Hello", &mut log).unwrap();
-        let app = &artifacts[0];
+        let delivered = deliver_script(&script, None, &request, "Hello", &mut log).unwrap();
+        let app = &delivered.artifacts[0];
         assert_eq!(app.extension().and_then(|ext| ext.to_str()), Some("app"));
         let plist = fs::read_to_string(app.join("Contents/Info.plist")).unwrap();
         assert!(plist.contains("<string>hello</string>"));
@@ -389,5 +491,42 @@ mod tests {
             String::from_utf8_lossy(&ran.stderr)
         );
         assert_eq!(String::from_utf8_lossy(&ran.stdout), "hello-packager\n");
+        let launcher = fs::read_to_string(&exe).unwrap();
+        assert!(launcher.contains("/opt/homebrew/bin"));
+        assert!(launcher.contains("Library/Python"));
+    }
+
+    #[test]
+    fn existing_app_is_left_in_place() {
+        let root = crate::fsutil::TempDir::new("packager-keep-app").unwrap();
+        let output = root.path().join("out");
+        fs::create_dir_all(&output).unwrap();
+        let existing = output.join("Hello.app");
+        fs::create_dir_all(existing.join("Contents")).unwrap();
+        fs::write(existing.join("Contents/marker"), "keep").unwrap();
+        let script = root.path().join("hello.sh");
+        fsutil::write_file(&script, "#!/bin/bash\necho hello-packager\n").unwrap();
+        let request = BuildRequest {
+            source: script.clone(),
+            output_dir: output,
+            language: None,
+            name: Some("Hello".into()),
+            mode: OutputMode::App,
+            icon: None,
+        };
+        let mut log = CaptureLog;
+        let delivered = deliver_script(&script, None, &request, "Hello", &mut log).unwrap();
+        assert_ne!(delivered.artifacts[0], existing);
+        assert_eq!(
+            fs::read_to_string(existing.join("Contents/marker")).unwrap(),
+            "keep"
+        );
+    }
+
+    #[test]
+    fn plist_escapes_markup() {
+        let plist = render_plist("A & B <C>", "tool", "dev.packager.a", false);
+        assert!(plist.contains("A &amp; B &lt;C&gt;"));
+        assert!(!plist.contains("A & B"));
     }
 }

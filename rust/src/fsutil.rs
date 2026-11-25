@@ -46,10 +46,88 @@ impl Drop for TempDir {
 }
 
 fn temp_root() -> PathBuf {
-    std::env::var_os("PACKAGER_TMP")
+    match std::env::var_os("PACKAGER_TMP")
         .map(PathBuf::from)
         .filter(|path| !path.as_os_str().is_empty())
-        .unwrap_or_else(std::env::temp_dir)
+    {
+        Some(path) => absolute(&path),
+        None => std::env::temp_dir(),
+    }
+}
+
+/// Absolute path with the existing prefix canonicalized.
+/// Missing trailing components are kept, so a not-yet-created output folder
+/// can still be compared with the project directory.
+pub fn normalize_path(path: &Path) -> PathBuf {
+    let mut current = absolute(path);
+    let mut missing = Vec::new();
+    while !current.as_os_str().is_empty() && !current.exists() {
+        match current.file_name() {
+            Some(name) => {
+                missing.push(name.to_os_string());
+                if !current.pop() {
+                    break;
+                }
+            }
+            None => break,
+        }
+    }
+    let mut canon = if current.as_os_str().is_empty() {
+        PathBuf::from("/")
+    } else {
+        fs::canonicalize(&current).unwrap_or(current)
+    };
+    for name in missing.into_iter().rev() {
+        canon.push(name);
+    }
+    canon
+}
+
+fn python_user_bins(home: &Path) -> Vec<PathBuf> {
+    version_bins(&home.join("Library/Python"))
+}
+
+fn framework_python_bins() -> Vec<PathBuf> {
+    version_bins(Path::new("/Library/Frameworks/Python.framework/Versions"))
+}
+
+fn version_bins(root: &Path) -> Vec<PathBuf> {
+    let Ok(read) = fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut versions: Vec<PathBuf> = read
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .filter(|path| path.file_name().and_then(|name| name.to_str()) != Some("Current"))
+        .collect();
+    versions.sort_by_key(|path| std::cmp::Reverse(version_key(path)));
+    versions
+        .into_iter()
+        .map(|version| version.join("bin"))
+        .filter(|bin| bin.is_dir())
+        .collect()
+}
+
+fn version_key(path: &Path) -> Vec<u32> {
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let mut parts = Vec::new();
+    let mut current = 0_u32;
+    let mut in_number = false;
+    for ch in name.chars() {
+        if let Some(digit) = ch.to_digit(10) {
+            current = current.saturating_mul(10).saturating_add(digit);
+            in_number = true;
+        } else if in_number {
+            parts.push(current);
+            current = 0;
+            in_number = false;
+        }
+    }
+    if in_number {
+        parts.push(current);
+    }
+    parts
 }
 
 pub fn absolute(path: &Path) -> PathBuf {
@@ -81,7 +159,7 @@ pub fn enriched_path() -> std::ffi::OsString {
                 }
             }
             if let Some(home) = std::env::var_os("HOME") {
-                let home = PathBuf::from(home);
+                let home = PathBuf::from(&home);
                 for rel in [
                     ".cargo/bin",
                     "go/bin",
@@ -89,17 +167,18 @@ pub fn enriched_path() -> std::ffi::OsString {
                     ".bun/bin",
                     ".dotnet",
                     ".dotnet/tools",
-                    "Library/Python/3.9/bin",
-                    "Library/Python/3.11/bin",
-                    "Library/Python/3.12/bin",
-                    "Library/Python/3.13/bin",
-                    "Library/Python/3.14/bin",
                 ] {
                     let dir = home.join(rel);
                     if dir.is_dir() {
                         push(dir);
                     }
                 }
+                for dir in python_user_bins(&home) {
+                    push(dir);
+                }
+            }
+            for dir in framework_python_bins() {
+                push(dir);
             }
             for dir in [
                 "/opt/homebrew/bin",
@@ -163,7 +242,7 @@ pub fn find_tool(names: &[&str]) -> Option<PathBuf> {
 }
 
 pub fn require_tool(names: &[&str], hint: &str) -> Result<PathBuf> {
-    find_tool(names).ok_or_else(|| PackagerError::msg(hint.to_string()))
+    find_tool(names).ok_or_else(|| PackagerError::msg(hint))
 }
 
 pub fn write_file(path: &Path, contents: &str) -> Result<()> {
@@ -203,10 +282,36 @@ pub fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
 
 pub fn copy_tree_excluding(src: &Path, dst: &Path, skip: &[PathBuf]) -> Result<()> {
     fs::create_dir_all(dst)?;
-    copy_tree_inner(src, dst, skip)
+    copy_tree_inner(src, dst, skip, false)
 }
 
-fn copy_tree_inner(src: &Path, dst: &Path, skip: &[PathBuf]) -> Result<()> {
+/// Copy a project into a scratch directory. Build products from an earlier
+/// run stay behind, and so does the directory the new product will occupy.
+pub fn copy_project(src: &Path, dst: &Path, skip: &[PathBuf]) -> Result<()> {
+    fs::create_dir_all(dst)?;
+    copy_tree_inner(src, dst, skip, true)
+}
+
+pub struct StagedProject {
+    _temp: TempDir,
+    path: PathBuf,
+}
+
+impl StagedProject {
+    pub fn stage(src: &Path, output_dir: &Path) -> Result<Self> {
+        let temp = TempDir::new("packager-stage")?;
+        let path = temp.path().join("src");
+        let skip = [output_dir.to_path_buf()];
+        copy_project(src, &path, &skip)?;
+        Ok(Self { _temp: temp, path })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+fn copy_tree_inner(src: &Path, dst: &Path, skip: &[PathBuf], skip_build_dirs: bool) -> Result<()> {
     for entry in fs::read_dir(src)? {
         let entry = entry?;
         let name = entry.file_name();
@@ -229,6 +334,15 @@ fn copy_tree_inner(src: &Path, dst: &Path, skip: &[PathBuf]) -> Result<()> {
         }
         let to = dst.join(&name);
         let file_type = entry.file_type()?;
+        if skip_build_dirs
+            && file_type.is_dir()
+            && matches!(
+                name_str.as_ref(),
+                "target" | "build" | "obj" | "zig-cache" | ".zig-cache"
+            )
+        {
+            continue;
+        }
         if file_type.is_symlink() {
             #[cfg(unix)]
             {
@@ -242,7 +356,7 @@ fn copy_tree_inner(src: &Path, dst: &Path, skip: &[PathBuf]) -> Result<()> {
         }
         if file_type.is_dir() {
             fs::create_dir_all(&to)?;
-            copy_tree_inner(&from, &to, skip)?;
+            copy_tree_inner(&from, &to, skip, skip_build_dirs)?;
         } else if file_type.is_file() {
             copy_file(&from, &to)?;
         }
@@ -375,12 +489,19 @@ pub fn quote_arg(value: &str) -> String {
     }
 }
 
-pub fn snapshot_names(dir: &Path) -> HashSet<String> {
-    fs::read_dir(dir)
-        .ok()
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|entry| entry.file_name().to_string_lossy().to_string())
-        .collect()
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn newer_python_user_bin_comes_first() {
+        let home = TempDir::new("python-bins").unwrap();
+        for version in ["3.9", "3.10"] {
+            fs::create_dir_all(home.path().join(format!("Library/Python/{version}/bin"))).unwrap();
+        }
+        let bins = python_user_bins(home.path());
+        assert_eq!(bins.len(), 2);
+        assert!(bins[0].ends_with("3.10/bin"), "{}", bins[0].display());
+        assert!(bins[1].ends_with("3.9/bin"), "{}", bins[1].display());
+    }
 }

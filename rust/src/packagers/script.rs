@@ -59,16 +59,16 @@ pub fn build(
         Language::Shell => Some("bash".to_string()),
         _ => Some(tool_name.clone()),
     };
-    let artifacts =
+    let delivered =
         product::deliver_script(&source, interpreter.as_deref(), request, display, log)?;
     let runtime = interpreter.as_deref().unwrap_or("the shell");
     let note = match detection.language {
         Language::Shell => "The app runs this shell script.".to_string(),
         _ => format!("The app runs with {runtime} on the machine that opens it."),
     };
-    Ok(super::outcome(
+    Ok(super::finish(
         detection.language,
-        artifacts,
+        delivered,
         spec.interpreter,
         vec![note],
     ))

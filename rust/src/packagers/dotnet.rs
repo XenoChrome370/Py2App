@@ -35,7 +35,24 @@ pub fn build(
     let dotnet = fsutil::require_tool(&["dotnet"], "Install the .NET SDK to package C# projects")?;
     let temp = TempDir::new("packager-dotnet")?;
     let project = ensure_project(detection, display, temp.path())?;
+    let staged = if project.starts_with(temp.path()) {
+        None
+    } else {
+        Some(fsutil::StagedProject::stage(
+            &detection.project_root,
+            &request.output_dir,
+        )?)
+    };
+    let project = match &staged {
+        Some(stage) => match project.strip_prefix(&detection.project_root) {
+            Ok(relative) => stage.path().join(relative),
+            Err(_) => project,
+        },
+        None => project,
+    };
     let publish = temp.path().join("publish");
+    let intermediate = temp.path().join("obj");
+    let base_output = temp.path().join("bin");
     process::run_ok(
         &dotnet,
         &[
@@ -45,6 +62,8 @@ pub fn build(
             "Release".into(),
             "-o".into(),
             publish.display().to_string(),
+            format!("-p:BaseIntermediateOutputPath={}/", intermediate.display()),
+            format!("-p:BaseOutputPath={}/", base_output.display()),
             "--nologo".into(),
         ],
         Some(project.parent().unwrap_or(Path::new("."))),
@@ -52,10 +71,10 @@ pub fn build(
         log,
     )?;
     let executable = find_apphost(&publish, &executable_slug(display))?;
-    let artifacts = product::deliver_tree(&publish, &executable, request, display, log)?;
-    Ok(super::outcome(
+    let delivered = product::deliver_tree(&publish, &executable, request, display, log)?;
+    Ok(super::finish(
         Language::CSharp,
-        artifacts,
+        delivered,
         "dotnet",
         vec!["The app runs with the .NET runtime installed on the machine that opens it.".into()],
     ))

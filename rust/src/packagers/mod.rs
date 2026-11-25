@@ -3,11 +3,13 @@ use std::path::Path;
 
 use crate::detect;
 use crate::error::{PackagerError, Result};
+use crate::fsutil;
 use crate::model::{
     display_name, language_catalog, BuildOutcome, BuildRequest, Language, LanguageInfo, OutputMode,
     Toolchain,
 };
 use crate::process::Log;
+use crate::product::Delivery;
 
 mod dart_lang;
 mod dotnet;
@@ -51,19 +53,6 @@ pub fn toolchains() -> Vec<Toolchain> {
 pub fn build(request: &BuildRequest, log: &mut dyn Log) -> Result<BuildOutcome> {
     let mut request = request.clone();
     request.source = fs::canonicalize(&request.source).unwrap_or(request.source);
-    if request.output_dir.exists() && !request.output_dir.is_dir() {
-        return Err(PackagerError::msg(format!(
-            "output is not a directory: {}",
-            request.output_dir.display()
-        )));
-    }
-    fs::create_dir_all(&request.output_dir).map_err(|err| {
-        PackagerError::msg(format!(
-            "could not create {}: {err}",
-            request.output_dir.display()
-        ))
-    })?;
-    request.output_dir = fs::canonicalize(&request.output_dir).unwrap_or(request.output_dir);
     if let Some(icon) = &request.icon {
         if !icon.is_file() {
             return Err(PackagerError::msg(format!(
@@ -75,6 +64,26 @@ pub fn build(request: &BuildRequest, log: &mut dyn Log) -> Result<BuildOutcome> 
     }
 
     let detection = detect::resolve(&request.source, request.language)?;
+    let project =
+        fs::canonicalize(&detection.project_root).unwrap_or(detection.project_root.clone());
+    let output = fsutil::normalize_path(&request.output_dir);
+    if output.starts_with(&project) {
+        return Err(PackagerError::msg(format!(
+            "output directory {} is inside the project {}. Choose a folder outside the source",
+            output.display(),
+            project.display()
+        )));
+    }
+    if output.exists() && !output.is_dir() {
+        return Err(PackagerError::msg(format!(
+            "output is not a directory: {}",
+            output.display()
+        )));
+    }
+    fs::create_dir_all(&output).map_err(|err| {
+        PackagerError::msg(format!("could not create {}: {err}", output.display()))
+    })?;
+    request.output_dir = fs::canonicalize(&output).unwrap_or(output);
     let display = display_name(&request, &detection);
     let kind = match request.mode {
         OutputMode::App => "an app",
@@ -104,6 +113,16 @@ pub fn build(request: &BuildRequest, log: &mut dyn Log) -> Result<BuildOutcome> 
         Language::Zig => zig_lang::build(&request, &detection, &display, log),
         Language::Dart => dart_lang::build(&request, &detection, &display, log),
     }
+}
+
+pub(crate) fn finish(
+    language: Language,
+    delivered: Delivery,
+    tool: &str,
+    mut notes: Vec<String>,
+) -> BuildOutcome {
+    notes.extend(delivered.notes);
+    outcome(language, delivered.artifacts, tool, notes)
 }
 
 pub(crate) fn outcome(

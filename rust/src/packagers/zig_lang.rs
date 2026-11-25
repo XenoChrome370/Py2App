@@ -33,7 +33,9 @@ pub fn build(
 ) -> Result<BuildOutcome> {
     let zig = fsutil::require_tool(&["zig"], "Install Zig from https://ziglang.org/download")?;
     let temp = TempDir::new("packager-zig")?;
+    let cache = temp.path().join("cache");
     if detection.project_root.join("build.zig").is_file() {
+        let staged = fsutil::StagedProject::stage(&detection.project_root, &request.output_dir)?;
         let prefix = temp.path().join("prefix");
         process::run_ok(
             &zig,
@@ -42,8 +44,10 @@ pub fn build(
                 "-Doptimize=ReleaseFast".into(),
                 "--prefix".into(),
                 prefix.display().to_string(),
+                "--cache-dir".into(),
+                cache.display().to_string(),
             ],
-            Some(&detection.project_root),
+            Some(staged.path()),
             &[],
             log,
         )?;
@@ -51,10 +55,10 @@ pub fn build(
         let binary = bins.into_iter().next().ok_or_else(|| {
             PackagerError::msg("zig build finished without an executable in prefix/bin")
         })?;
-        let artifacts = product::deliver_binary(&binary, request, display, log)?;
-        return Ok(super::outcome(
+        let delivered = product::deliver_binary(&binary, request, display, log)?;
+        return Ok(super::finish(
             Language::Zig,
-            artifacts,
+            delivered,
             "zig",
             vec!["Native executable.".into()],
         ));
@@ -65,6 +69,8 @@ pub fn build(
         &zig,
         &[
             "build-exe".into(),
+            "--cache-dir".into(),
+            cache.display().to_string(),
             "-O".into(),
             "ReleaseFast".into(),
             format!("-femit-bin={}", binary.display()),
@@ -74,10 +80,10 @@ pub fn build(
         &[],
         log,
     )?;
-    let artifacts = product::deliver_binary(&binary, request, display, log)?;
-    Ok(super::outcome(
+    let delivered = product::deliver_binary(&binary, request, display, log)?;
+    Ok(super::finish(
         Language::Zig,
-        artifacts,
+        delivered,
         "zig",
         vec!["Native executable.".into()],
     ))

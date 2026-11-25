@@ -83,10 +83,10 @@ pub fn build(
             &[],
             log,
         )?;
-        let artifacts = product::deliver_binary(&compiled, request, display, log)?;
-        return Ok(super::outcome(
+        let delivered = product::deliver_binary(&compiled, request, display, log)?;
+        return Ok(super::finish(
             detection.language,
-            artifacts,
+            delivered,
             "bun",
             vec!["Self-contained executable built with bun.".into()],
         ));
@@ -110,10 +110,10 @@ pub fn build(
             &[],
             log,
         )?;
-        let artifacts = product::deliver_binary(&compiled, request, display, log)?;
-        return Ok(super::outcome(
+        let delivered = product::deliver_binary(&compiled, request, display, log)?;
+        return Ok(super::finish(
             detection.language,
-            artifacts,
+            delivered,
             "pkg",
             vec!["Self-contained executable built with pkg.".into()],
         ));
@@ -126,7 +126,7 @@ pub fn build(
         fsutil::copy_tree_excluding(
             &detection.project_root,
             &payload,
-            &[request.output_dir.clone()],
+            std::slice::from_ref(&request.output_dir),
         )?;
         let relative = entry
             .strip_prefix(&detection.project_root)
@@ -141,19 +141,19 @@ pub fn build(
         let launcher = payload.join(&launcher_name);
         fsutil::write_file(&launcher, &node_launcher(&relative))?;
         fsutil::make_executable(&launcher)?;
-        let artifacts = product::deliver_tree(&payload, &launcher, request, display, log)?;
-        return Ok(super::outcome(
+        let delivered = product::deliver_tree(&payload, &launcher, request, display, log)?;
+        return Ok(super::finish(
             detection.language,
-            artifacts,
+            delivered,
             "node",
             vec!["The app runs with Node.js on the machine that opens it.".into()],
         ));
     }
 
-    let artifacts = product::deliver_script(&entry, Some("node"), request, display, log)?;
-    Ok(super::outcome(
+    let delivered = product::deliver_script(&entry, Some("node"), request, display, log)?;
+    Ok(super::finish(
         detection.language,
-        artifacts,
+        delivered,
         "node",
         vec!["The app runs with Node.js on the machine that opens it.".into()],
     ))
@@ -161,7 +161,8 @@ pub fn build(
 
 fn node_launcher(relative: &str) -> String {
     let quoted = fsutil::bash_single(relative);
+    let path_setup = product::shell_path_setup();
     format!(
-        "#!/bin/bash\nset -euo pipefail\nHERE=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\ncd \"$HERE\"\nexec /usr/bin/env node \"$HERE\"/{quoted} \"$@\"\n"
+        "#!/bin/bash\nset -euo pipefail\n{path_setup}\nHERE=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\ncd \"$HERE\"\nexec /usr/bin/env node \"$HERE\"/{quoted} \"$@\"\n"
     )
 }

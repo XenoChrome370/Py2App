@@ -86,14 +86,14 @@ fn cmake_build(
         log,
     )?;
     let binary = choose_binary(fsutil::executables_under(&build_dir, 4))?;
-    let artifacts = product::deliver_binary(&binary, request, display, log)?;
-    Ok(super::outcome(
+    let delivered = product::deliver_binary(&binary, request, display, log)?;
+    Ok(super::finish(
         if detection_cpp(root) {
             Language::Cpp
         } else {
             Language::C
         },
-        artifacts,
+        delivered,
         "cmake",
         vec!["Native release build.".into()],
     ))
@@ -105,6 +105,8 @@ fn make_build(
     display: &str,
     log: &mut dyn Log,
 ) -> Result<BuildOutcome> {
+    let staged = fsutil::StagedProject::stage(root, &request.output_dir)?;
+    let root = staged.path();
     let make = fsutil::require_tool(&["make"], "Install make to package this project")?;
     let before = fsutil::executables_under(root, 3);
     process::run_ok(
@@ -121,14 +123,14 @@ fn make_build(
         .collect();
     let pool = if fresh.is_empty() { before } else { fresh };
     let binary = choose_binary(pool)?;
-    let artifacts = product::deliver_binary(&binary, request, display, log)?;
-    Ok(super::outcome(
+    let delivered = product::deliver_binary(&binary, request, display, log)?;
+    Ok(super::finish(
         if detection_cpp(root) {
             Language::Cpp
         } else {
             Language::C
         },
-        artifacts,
+        delivered,
         "make",
         vec!["Native build from the Makefile.".into()],
     ))
@@ -164,10 +166,10 @@ fn compile_sources(
         args.push(source.display().to_string());
     }
     process::run_ok(&compiler, &args, Some(&detection.project_root), &[], log)?;
-    let artifacts = product::deliver_binary(&binary, request, display, log)?;
-    Ok(super::outcome(
+    let delivered = product::deliver_binary(&binary, request, display, log)?;
+    Ok(super::finish(
         detection.language,
-        artifacts,
+        delivered,
         if cpp { "clang++" } else { "clang" },
         vec!["Native executable.".into()],
     ))

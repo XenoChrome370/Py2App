@@ -28,6 +28,16 @@ fn workspace(name: &str) -> PathBuf {
     path
 }
 
+fn tool_installed(name: &str) -> bool {
+    match Command::new(name).arg("--version").output() {
+        Ok(_) => true,
+        Err(_) => {
+            eprintln!("skip: {name} is not installed");
+            false
+        }
+    }
+}
+
 fn request(source: &Path, output: &Path, mode: OutputMode) -> BuildRequest {
     BuildRequest {
         source: source.to_path_buf(),
@@ -56,9 +66,11 @@ fn cli_lists_python() {
 #[test]
 fn shell_app_prints_hello_and_leaves_the_source_tree_alone() {
     let root = workspace("shell");
-    let script = root.join("hello.sh");
+    let source = root.join("project");
+    fs::create_dir_all(&source).unwrap();
+    let script = source.join("hello.sh");
     fs::write(&script, "#!/bin/bash\necho hello-packager\n").unwrap();
-    let before = fs::read_dir(&root).unwrap().count();
+    let before = fs::read_dir(&source).unwrap().count();
     let output = root.join("out");
     fs::create_dir_all(&output).unwrap();
     let mut log = Capture { lines: Vec::new() };
@@ -72,21 +84,35 @@ fn shell_app_prints_hello_and_leaves_the_source_tree_alone() {
         String::from_utf8_lossy(&ran.stderr)
     );
     assert_eq!(String::from_utf8_lossy(&ran.stdout), "hello-packager\n");
-    let after = fs::read_dir(&root)
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name())
-        .filter(|name| name != "out")
-        .count();
+    let after = fs::read_dir(&source).unwrap().count();
     assert_eq!(before, after);
 }
 
 #[test]
+fn output_inside_the_project_is_rejected() {
+    let root = workspace("overlap");
+    let script = root.join("hello.sh");
+    fs::write(&script, "#!/bin/bash\necho hi\n").unwrap();
+    let output = root.join("out");
+    fs::create_dir_all(&output).unwrap();
+    let mut log = Capture { lines: Vec::new() };
+    let err = build(&request(&script, &output, OutputMode::App), &mut log).unwrap_err();
+    assert!(
+        err.message().contains("inside the project"),
+        "{}",
+        err.message()
+    );
+}
+
+#[test]
 fn c_tool_prints_hello() {
-    if Command::new("clang").arg("--version").output().is_err() {
+    if !tool_installed("clang") {
         return;
     }
     let root = workspace("c");
-    let source = root.join("main.c");
+    let project = root.join("project");
+    fs::create_dir_all(&project).unwrap();
+    let source = project.join("main.c");
     fs::write(
         &source,
         "#include <stdio.h>\nint main(void){puts(\"hello-c\");}\n",
@@ -108,11 +134,13 @@ fn c_tool_prints_hello() {
 
 #[test]
 fn rust_file_tool_prints_hello() {
-    if Command::new("rustc").arg("--version").output().is_err() {
+    if !tool_installed("rustc") {
         return;
     }
     let root = workspace("rust");
-    let source = root.join("main.rs");
+    let project = root.join("project");
+    fs::create_dir_all(&project).unwrap();
+    let source = project.join("main.rs");
     fs::write(&source, "fn main(){println!(\"hello-rust\");}\n").unwrap();
     let output = root.join("out");
     fs::create_dir_all(&output).unwrap();
@@ -130,11 +158,13 @@ fn rust_file_tool_prints_hello() {
 
 #[test]
 fn node_tool_prints_hello() {
-    if Command::new("node").arg("--version").output().is_err() {
+    if !tool_installed("node") {
         return;
     }
     let root = workspace("node");
-    let source = root.join("main.js");
+    let project = root.join("project");
+    fs::create_dir_all(&project).unwrap();
+    let source = project.join("main.js");
     fs::write(&source, "console.log('hello-node')\n").unwrap();
     let output = root.join("out");
     fs::create_dir_all(&output).unwrap();

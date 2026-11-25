@@ -40,7 +40,7 @@ fn detect(path: &Path) -> Result<Detection> {
         }
         if is_header(&name) {
             return Err(PackagerError::msg(
-                "choose a source file rather than a header".to_string(),
+                "choose a source file rather than a header",
             ));
         }
         detect_file(path)
@@ -204,12 +204,10 @@ fn identify_dir(dir: &Path) -> Option<(Language, String)> {
 
 fn project_entry(dir: &Path, language: Language) -> Result<PathBuf> {
     match language {
-        Language::Rust
-        | Language::Go
-        | Language::Swift
-        | Language::Zig
-        | Language::Java
-        | Language::Kotlin => Ok(dir.to_path_buf()),
+        Language::Rust | Language::Swift | Language::Zig | Language::Java | Language::Kotlin => {
+            Ok(dir.to_path_buf())
+        }
+        Language::Go => go_entry(dir),
         Language::CSharp => Ok(only_or_dir(dir, &["csproj", "fsproj", "sln"])),
         Language::Dart => dart_entry(dir),
         Language::JavaScript | Language::TypeScript => node_entry(dir, language),
@@ -502,31 +500,42 @@ fn marker_for(language: Language) -> Option<&'static str> {
 }
 
 fn is_project_marker(name: &str) -> bool {
-    matches!(
-        name,
-        "Cargo.toml"
-            | "go.mod"
-            | "Package.swift"
-            | "build.zig"
-            | "pubspec.yaml"
-            | "package.json"
-            | "pyproject.toml"
-            | "setup.py"
-            | "setup.cfg"
-            | "requirements.txt"
-            | "Pipfile"
-            | "Pipfile.lock"
-            | "Gemfile"
-            | "composer.json"
-            | "CMakeLists.txt"
-            | "Makefile"
-            | "makefile"
-            | "GNUmakefile"
-            | "pom.xml"
-            | "build.gradle"
-            | "build.gradle.kts"
-            | "tsconfig.json"
-    )
+    crate::model::is_project_marker(name)
+}
+
+fn go_entry(dir: &Path) -> Result<PathBuf> {
+    if go_package_is_main(dir) {
+        return Ok(dir.to_path_buf());
+    }
+    let cmd = dir.join("cmd");
+    let mut packages = Vec::new();
+    if cmd.is_dir() {
+        if let Ok(read) = fs::read_dir(&cmd) {
+            for entry in read.flatten() {
+                let path = entry.path();
+                if path.is_dir() && go_package_is_main(&path) {
+                    packages.push(path);
+                }
+            }
+        }
+    }
+    packages.sort();
+    if packages.len() == 1 {
+        Ok(packages.remove(0))
+    } else {
+        Ok(dir.to_path_buf())
+    }
+}
+
+fn go_package_is_main(dir: &Path) -> bool {
+    fsutil::files_with_extensions(dir, &["go"], 1)
+        .into_iter()
+        .filter(|path| !fsutil::file_name(path).ends_with("_test.go"))
+        .any(|path| {
+            fs::read_to_string(path)
+                .ok()
+                .is_some_and(|text| text.lines().any(|line| line.trim() == "package main"))
+        })
 }
 
 fn is_header(name: &str) -> bool {
@@ -598,27 +607,51 @@ fn only_or_dir(dir: &Path, extensions: &[&str]) -> PathBuf {
 fn shebang_language(path: &Path) -> Option<Language> {
     let text = fs::read_to_string(path).ok()?;
     let line = text.lines().next()?.trim();
-    if !line.starts_with("#!") {
+    let rest = line.strip_prefix("#!")?.trim();
+    let token = shebang_token(rest)?;
+    language_for_interpreter(&token)
+}
+
+fn shebang_token(rest: &str) -> Option<String> {
+    let mut parts = rest.split_whitespace();
+    let first = parts.next()?;
+    let base = Path::new(first).file_name()?.to_string_lossy().to_string();
+    if base == "env" {
+        for part in parts {
+            if part.starts_with('-') {
+                continue;
+            }
+            return Some(Path::new(part).file_name()?.to_string_lossy().to_string());
+        }
         return None;
     }
-    let lower = line.to_ascii_lowercase();
-    if lower.contains("python") {
-        Some(Language::Python)
-    } else if lower.contains("ruby") {
-        Some(Language::Ruby)
-    } else if lower.contains("node") {
-        Some(Language::JavaScript)
-    } else if lower.contains("php") {
-        Some(Language::Php)
-    } else if lower.contains("perl") {
-        Some(Language::Perl)
-    } else if lower.contains("lua") {
-        Some(Language::Lua)
-    } else if lower.contains("bash") || lower.contains("zsh") || lower.contains("sh") {
-        Some(Language::Shell)
-    } else {
-        None
+    Some(base)
+}
+
+fn language_for_interpreter(token: &str) -> Option<Language> {
+    let token = token.to_ascii_lowercase();
+    if token.starts_with("python") {
+        return Some(Language::Python);
     }
+    if token.starts_with("ruby") {
+        return Some(Language::Ruby);
+    }
+    if token == "node" || token == "nodejs" {
+        return Some(Language::JavaScript);
+    }
+    if token.starts_with("php") {
+        return Some(Language::Php);
+    }
+    if token.starts_with("perl") {
+        return Some(Language::Perl);
+    }
+    if token == "lua" || token == "luajit" {
+        return Some(Language::Lua);
+    }
+    if matches!(token.as_str(), "bash" | "zsh" | "sh" | "dash" | "ksh") {
+        return Some(Language::Shell);
+    }
+    None
 }
 
 #[cfg(test)]
@@ -637,7 +670,7 @@ mod tests {
         fs::write(&file, "print('hi')\n").unwrap();
         let detected = resolve(&file, None).unwrap();
         assert_eq!(detected.language, Language::Python);
-        assert_eq!(detected.entry, file);
+        assert_eq!(detected.entry, fs::canonicalize(&file).unwrap());
 
         let rust_dir = scratch("detect-rs");
         fs::write(
@@ -675,5 +708,34 @@ mod tests {
         fs::write(mixed.path().join("a.py"), "print(1)\n").unwrap();
         fs::write(mixed.path().join("b.rb"), "puts 1\n").unwrap();
         assert!(resolve(mixed.path(), None).is_err());
+    }
+
+    #[test]
+    fn shebang_matches_bash_and_not_fish() {
+        let dir = scratch("shebang");
+        let bash = dir.path().join("run");
+        fs::write(&bash, "#!/usr/bin/env bash\necho hi\n").unwrap();
+        assert_eq!(resolve(&bash, None).unwrap().language, Language::Shell);
+
+        let direct = dir.path().join("direct");
+        fs::write(&direct, "#!/bin/bash\necho hi\n").unwrap();
+        assert_eq!(resolve(&direct, None).unwrap().language, Language::Shell);
+
+        let fish = dir.path().join("swim");
+        fs::write(&fish, "#!/usr/bin/env fish\necho hi\n").unwrap();
+        assert!(resolve(&fish, None).is_err());
+    }
+
+    #[test]
+    fn go_module_uses_the_single_cmd_package() {
+        let dir = scratch("go-cmd");
+        fs::write(dir.path().join("go.mod"), "module example.com/demo\n").unwrap();
+        fs::write(dir.path().join("lib.go"), "package demo\n").unwrap();
+        let cmd = dir.path().join("cmd/demo");
+        fs::create_dir_all(&cmd).unwrap();
+        fs::write(cmd.join("main.go"), "package main\nfunc main() {}\n").unwrap();
+        let detected = resolve(dir.path(), None).unwrap();
+        assert_eq!(detected.language, Language::Go);
+        assert_eq!(detected.entry, fs::canonicalize(&cmd).unwrap());
     }
 }
