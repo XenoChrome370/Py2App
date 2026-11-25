@@ -1,0 +1,9 @@
+dist/
+.tmp/
+target/
+rust/target/
+build/
+*.app
+.DS_Store
+xcuserdata/
+*.xcuserstate

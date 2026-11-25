@@ -1,92 +1,83 @@
-# Py2App GUI
+# Packager
 
-A simple graphical user interface (GUI) application for packaging Python scripts into standalone executables using PyInstaller and py2app.
+Packager turns a source file or a project folder into a macOS application or a command-line tool. The window is a SwiftUI app in `Packager.xcodeproj`. A Rust engine, bundled inside the app, detects the language and runs the toolchain.
 
-## Description
-
-Py2App GUI provides an easy-to-use interface for converting Python scripts into executable applications. It supports cross-platform builds for Windows, macOS, and Linux, automatically selecting the appropriate packaging tool based on the target operating system.
-
-- **macOS**: Uses py2app for creating .app bundles
-- **Windows & Linux**: Uses PyInstaller for creating single executable files
-
-## Features
-
-- Simple GUI for selecting script path and output directory
-- Cross-platform support (Windows, macOS, Linux)
-- Automatic tool selection based on target OS
-- Real-time build process feedback with live logs
-- Error handling and user notifications
-- Browse buttons for easy file/directory selection
-
-## Requirements
-
-- Python 3.x
-- PyQt5
-- PyInstaller (for Windows/Linux builds)
-- py2app (for macOS builds)
-
-## Installation
-
-1. Clone or download this repository
-2. Install the required dependencies:
+## Open in Xcode
 
 ```bash
-pip install PyQt5 pyinstaller py2app
+open Packager.xcodeproj
 ```
 
-## Usage
+The Packager scheme builds the SwiftUI app. A build phase compiles the Rust engine and copies `packager-engine` into the app. Debug builds use `cargo build`. Release builds use `cargo build --release`.
 
-1. Run the application:
+## Build the app
+
+You need Xcode and Rust.
 
 ```bash
-python main.py
+./scripts/build-app.sh
+open dist/Packager.app
 ```
 
-2. In the GUI:
-   - Use the "Browse" button next to "Script Path" to select your Python script (.py file)
-   - Use the "Browse" button next to "Output Directory" to select where to save the executable (optional)
-   - Select the target operating system from the dropdown
-   - Click "Build"
+The script builds the Packager scheme in Release and signs `dist/Packager.app`.
 
-3. Monitor the build progress in the "Build Log" area
-4. The application will generate the executable in the specified output directory
+Redraw the app icon with `python3 scripts/make-icon.py`. That writes the image set in `Packager/Assets.xcassets`.
 
-## Building the GUI Itself
+## Use it
 
-To package the Py2App GUI into an executable:
+1. Choose a source file or a project folder. You can drop it on the window.
+2. Packager names the product and shows the language it found.
+3. Choose **App** for a double-clickable `.app`, or **Tool** for a terminal program.
+4. Click **Build**. The log streams while the toolchain runs.
 
-1. Select `main.py` as the script
-2. Choose macOS as the target OS
-3. Click "Build"
+The build uses the compilers installed on this Mac. A Finder-launched app still sees the tools from your login shell, including Homebrew and `~/.cargo/bin`.
 
-This will create a standalone .app bundle for the GUI application that includes setuptools and can be used to package other Python scripts on macOS. Note: The packaged GUI relies on system-installed PyInstaller for building Windows/Linux executables.
+Packaging writes its scratch files in a temporary directory. It does not add a `setup.py` to the project you selected.
 
-## Troubleshooting
+## Languages
 
-- Ensure all dependencies are installed
-- Check that the Python script to package has no syntax errors
-- For macOS builds, py2app requires setuptools
-- If builds fail, check the build log for detailed error messages
+| Language | How a project is recognized | What you get |
+| --- | --- | --- |
+| Python | `.py`, `pyproject.toml`, `requirements.txt` | macOS app with py2app, or a PyInstaller tool |
+| Rust | `Cargo.toml`, `.rs` | `cargo build --release`, or `rustc` for one file |
+| Go | `go.mod`, `.go` | `go build` |
+| JavaScript | `package.json`, `.js` | `bun --compile`, `pkg`, or a Node launcher |
+| TypeScript | `tsconfig.json`, `.ts` | `bun build --compile` |
+| Swift | `Package.swift`, `.swift` | `swift build -c release`, or `swiftc` |
+| C | `.c`, CMake, Make | `clang`, CMake, or Make |
+| C++ | `.cpp`, CMake, Make | `clang++`, CMake, or Make |
+| Java | `pom.xml`, Gradle, `.java` | Maven or Gradle, then `jpackage` when it is installed |
+| Kotlin | `.kt`, Gradle | Gradle, or `kotlinc` |
+| C# | `.csproj`, `.cs` | `dotnet publish` |
+| Ruby | `.rb`, `Gemfile` | App that runs with Ruby |
+| PHP | `.php`, `composer.json` | App that runs with PHP |
+| Perl | `.pl` | App that runs with Perl |
+| Lua | `.lua` | App that runs with Lua |
+| Shell | `.sh` | App that runs the script |
+| Zig | `build.zig`, `.zig` | `zig build` |
+| Dart | `pubspec.yaml`, `.dart` | `dart compile exe` |
 
-## License
+Python apps need `py2app` (`python3 -m pip install py2app`). Python tools need PyInstaller (`python3 -m pip install pyinstaller`). Other languages need their normal compiler. The Toolchains list in the window shows what is installed.
 
-This project is open-source. Feel free to modify and distribute.
+Interpreted programs keep a launcher that calls the runtime on the machine that opens them. Rust, C, C++, Go, Zig, and `bun --compile` produce a native executable. `jpackage` includes a Java runtime when it is available.
 
-## Author
+## Command line
 
-Created for simplifying Python application packaging.
+The same engine is available as `packager`:
 
-## How It Works
+```bash
+cargo build --release --manifest-path rust/Cargo.toml
+./rust/target/release/packager languages
+./rust/target/release/packager detect path/to/project
+./rust/target/release/packager build --source path/to/project --output ~/Desktop --name Hello --mode app
+```
 
-The application dynamically generates the necessary setup files and runs the appropriate packaging tool:
+`--mode tool` writes a terminal program. `--language` overrides detection. Pass `--icon` with a `.icns` or `.png` file for an app icon.
 
-- For macOS: Creates a `setup.py` file with py2app configuration and runs `python setup.py py2app`
-- For Windows/Linux: Runs PyInstaller with `--onefile` option
+## Tests
 
-## Contributing
+```bash
+PACKAGER_TMP=.tmp cargo test --manifest-path rust/Cargo.toml
+```
 
-Feel free to submit issues and pull requests to improve the application.
-
-## License
-
-This project is open source. Please check for any specific licensing information.
+The tests detect projects and package small C, Rust, JavaScript, and shell programs.
