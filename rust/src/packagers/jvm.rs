@@ -68,6 +68,8 @@ fn maven(
     language: Language,
     log: &mut dyn Log,
 ) -> Result<BuildOutcome> {
+    let staged = fsutil::StagedProject::stage(root, &request.output_dir)?;
+    let root = staged.path();
     let mvnw = root.join("mvnw");
     if mvnw.is_file() {
         let bash = fsutil::require_tool(&["bash"], "bash is required to run mvnw")?;
@@ -112,6 +114,8 @@ fn gradle(
     language: Language,
     log: &mut dyn Log,
 ) -> Result<BuildOutcome> {
+    let staged = fsutil::StagedProject::stage(root, &request.output_dir)?;
+    let root = staged.path();
     let gradlew = root.join("gradlew");
     if gradlew.is_file() {
         let bash = fsutil::require_tool(&["bash"], "bash is required to run gradlew")?;
@@ -275,10 +279,10 @@ fn emit_jar(
     let launcher = payload.join("launch");
     fsutil::write_file(&launcher, &java_launcher(main_class.as_deref()))?;
     fsutil::make_executable(&launcher)?;
-    let artifacts = product::deliver_tree(&payload, &launcher, request, display, log)?;
-    Ok(super::outcome(
+    let delivered = product::deliver_tree(&payload, &launcher, request, display, log)?;
+    Ok(super::finish(
         language,
-        artifacts,
+        delivered,
         tool,
         vec!["The app runs with Java on the machine that opens it.".into()],
     ))
@@ -298,12 +302,10 @@ fn try_jpackage(
     };
     let temp = TempDir::new("packager-jpackage")?;
     let input = temp.path().join("input");
+    let dest_dir = temp.path().join("dest");
     fs::create_dir_all(&input)?;
+    fs::create_dir_all(&dest_dir)?;
     fsutil::copy_file(jar_path, &input.join("app.jar"))?;
-    let dest_app = request.output_dir.join(format!("{display}.app"));
-    if dest_app.exists() {
-        fs::remove_dir_all(&dest_app)?;
-    }
     let mut args = vec![
         "--type".into(),
         "app-image".into(),
@@ -316,7 +318,7 @@ fn try_jpackage(
         "--main-class".into(),
         main_class.to_string(),
         "--dest".into(),
-        request.output_dir.display().to_string(),
+        dest_dir.display().to_string(),
     ];
     if let Some(icon) = &request.icon {
         if fsutil::extension_of(icon).as_deref() == Some("icns") {
@@ -324,9 +326,16 @@ fn try_jpackage(
             args.push(icon.display().to_string());
         }
     }
-    match process::run(jpackage, &args, Some(&request.output_dir), &[], log)? {
-        0 if dest_app.is_dir() => Ok(Some(dest_app)),
-        0 => Ok(find_app(&request.output_dir, display)),
+    match process::run(jpackage, &args, Some(&dest_dir), &[], log)? {
+        0 => {
+            let Some(built) = find_app(&dest_dir, display) else {
+                log.line("jpackage did not produce an app. Writing a Java launcher instead.");
+                return Ok(None);
+            };
+            let placed =
+                product::place_path(&built, &request.output_dir, &format!("{display}.app"), log)?;
+            Ok(Some(placed))
+        }
         _ => {
             log.line("jpackage did not produce an app. Writing a Java launcher instead.");
             Ok(None)
@@ -345,11 +354,15 @@ fn find_app(dir: &Path, display: &str) -> Option<PathBuf> {
 
 fn java_launcher(main_class: Option<&str>) -> String {
     let command = match main_class {
-        Some(class) => format!("exec java -cp \"$HERE/app.jar\" {class} \"$@\""),
+        Some(class) => format!(
+            "exec java -cp \"$HERE/app.jar\" {} \"$@\"",
+            fsutil::bash_single(class)
+        ),
         None => "exec java -jar \"$HERE/app.jar\" \"$@\"".to_string(),
     };
+    let path_setup = product::shell_path_setup();
     format!(
-        "#!/bin/bash\nset -euo pipefail\nHERE=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\ncd \"$HERE\"\n{command}\n"
+        "#!/bin/bash\nset -euo pipefail\n{path_setup}\nHERE=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\ncd \"$HERE\"\n{command}\n"
     )
 }
 
@@ -461,5 +474,29 @@ fn kotlin_class_name(source: &Path) -> String {
     match package {
         Some(package) if !package.is_empty() => format!("{package}.{class_name}"),
         _ => class_name,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manifest_main_class_is_parsed_and_quoted() {
+        let manifest = "Manifest-Version: 1.0\nMain-Class: com.example.Main\n";
+        assert_eq!(
+            parse_main_class(manifest).as_deref(),
+            Some("com.example.Main")
+        );
+        let wrapped = "Main-Class: com.example.\n Main\n";
+        assert_eq!(
+            parse_main_class(wrapped).as_deref(),
+            Some("com.example.Main")
+        );
+        let launcher = java_launcher(Some("com.example.My Class"));
+        assert!(launcher.contains("'com.example.My Class'"));
+        assert!(launcher.contains("/opt/homebrew/bin"));
+        assert!(launcher.contains("Library/Python"));
+        assert!(!launcher.contains("exec java -cp \"$HERE/app.jar\" com.example.My Class"));
     }
 }

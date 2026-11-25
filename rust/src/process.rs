@@ -36,12 +36,61 @@ pub fn run(
     extra_env: &[(&str, &str)],
     log: &mut dyn Log,
 ) -> Result<i32> {
-    let mut rendered = quote_arg(&program.display().to_string());
-    for arg in args {
-        rendered.push(' ');
-        rendered.push_str(&quote_arg(arg));
+    run_command(program, args, cwd, extra_env, true, log)
+}
+
+/// Run a command without echoing it. Output is returned only when it fails,
+/// so icon conversion and code signing stay off the build log unless they break.
+pub fn run_silent(
+    program: &Path,
+    args: &[String],
+    cwd: Option<&Path>,
+    extra_env: &[(&str, &str)],
+) -> Result<()> {
+    let mut captured = CaptureLog::default();
+    let code = run_command(program, args, cwd, extra_env, false, &mut captured)?;
+    if code != 0 {
+        let detail = captured.lines.join("\n");
+        let suffix = if detail.is_empty() {
+            String::new()
+        } else {
+            format!("\n{detail}")
+        };
+        return Err(PackagerError::msg(format!(
+            "{} exited with status {code}{suffix}",
+            program.display()
+        )));
     }
-    log.line(&format!("$ {rendered}"));
+    Ok(())
+}
+
+#[derive(Default)]
+struct CaptureLog {
+    lines: Vec<String>,
+}
+
+impl Log for CaptureLog {
+    fn line(&mut self, text: &str) {
+        self.lines.push(text.to_string());
+    }
+}
+
+fn run_command(
+    program: &Path,
+    args: &[String],
+    cwd: Option<&Path>,
+    extra_env: &[(&str, &str)],
+    echo: bool,
+    log: &mut dyn Log,
+) -> Result<i32> {
+    if echo {
+        let mut rendered = quote_arg(&program.display().to_string());
+        for arg in args {
+            rendered.push(' ');
+            rendered.push_str(&quote_arg(arg));
+        }
+        log.line(&format!("$ {rendered}"));
+    }
 
     let mut command = Command::new(program);
     command

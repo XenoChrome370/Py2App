@@ -54,10 +54,10 @@ pub fn build(
         &[],
         log,
     )?;
-    let artifacts = product::deliver_binary(&binary, request, display, log)?;
-    Ok(super::outcome(
+    let delivered = product::deliver_binary(&binary, request, display, log)?;
+    Ok(super::finish(
         Language::Rust,
-        artifacts,
+        delivered,
         "rustc",
         vec!["Native executable.".into()],
     ))
@@ -72,22 +72,37 @@ fn cargo_build(
 ) -> Result<BuildOutcome> {
     let cargo = fsutil::require_tool(&["cargo"], "Install Rust from https://rustup.rs")?;
     let temp = TempDir::new("packager-cargo")?;
-    let names = cargo_bin_names(&cargo, manifest);
-    process::run_ok(
-        &cargo,
-        &[
-            "build".into(),
-            "--release".into(),
-            "--bins".into(),
-            "--manifest-path".into(),
-            manifest.display().to_string(),
-            "--target-dir".into(),
-            temp.path().display().to_string(),
-        ],
-        Some(manifest.parent().unwrap_or(Path::new("."))),
-        &[],
-        log,
-    )?;
+    let root = manifest.parent().unwrap_or(Path::new("."));
+    let staged = if root.join("Cargo.lock").is_file() {
+        None
+    } else {
+        Some(fsutil::StagedProject::stage(root, &request.output_dir)?)
+    };
+    let manifest = match &staged {
+        Some(stage) => stage.path().join("Cargo.toml"),
+        None => manifest.to_path_buf(),
+    };
+    let cwd = match &staged {
+        Some(stage) => stage.path().to_path_buf(),
+        None => root.to_path_buf(),
+    };
+    let names = cargo_bin_names(&cargo, &manifest);
+    let mut args = vec![
+        "build".into(),
+        "--release".into(),
+        "--bins".into(),
+        "--manifest-path".into(),
+        manifest.display().to_string(),
+        "--target-dir".into(),
+        temp.path().display().to_string(),
+    ];
+    if manifest
+        .parent()
+        .is_some_and(|dir| dir.join("Cargo.lock").is_file())
+    {
+        args.push("--locked".into());
+    }
+    process::run_ok(&cargo, &args, Some(&cwd), &[], log)?;
     let release = temp.path().join("release");
     let mut binaries = Vec::new();
     if let Some(names) = names {
@@ -107,6 +122,7 @@ fn cargo_build(
         ));
     }
     let mut artifacts = Vec::new();
+    let mut notes = vec!["Native release build.".to_string()];
     let several = binaries.len() > 1;
     for binary in binaries {
         let name = if several {
@@ -114,14 +130,11 @@ fn cargo_build(
         } else {
             display.to_string()
         };
-        artifacts.extend(product::deliver_binary(&binary, request, &name, log)?);
+        let delivered = product::deliver_binary(&binary, request, &name, log)?;
+        artifacts.extend(delivered.artifacts);
+        notes.extend(delivered.notes);
     }
-    Ok(super::outcome(
-        Language::Rust,
-        artifacts,
-        "cargo",
-        vec!["Native release build.".into()],
-    ))
+    Ok(super::outcome(Language::Rust, artifacts, "cargo", notes))
 }
 
 fn cargo_bin_names(cargo: &Path, manifest: &Path) -> Option<Vec<String>> {

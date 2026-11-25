@@ -88,15 +88,26 @@ enum EngineClient {
         let handle = pipe.fileHandleForReading
         return await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
+                var decoder = Utf8Decoder()
                 while true {
                     let data = handle.availableData
-                    if !data.isEmpty, let text = String(data: data, encoding: .utf8) {
-                        onText(text)
+                    if !data.isEmpty {
+                        let text = decoder.append(data)
+                        if !text.isEmpty {
+                            onText(text)
+                        }
                     }
                     if !process.isRunning {
                         let rest = handle.availableData
-                        if !rest.isEmpty, let text = String(data: rest, encoding: .utf8) {
-                            onText(text)
+                        if !rest.isEmpty {
+                            let text = decoder.append(rest)
+                            if !text.isEmpty {
+                                onText(text)
+                            }
+                        }
+                        let tail = decoder.finish()
+                        if !tail.isEmpty {
+                            onText(tail)
                         }
                         break
                     }
@@ -152,6 +163,51 @@ final class RunningProcess: @unchecked Sendable {
         if process.isRunning {
             process.terminate()
         }
+    }
+}
+
+/// Keeps a short tail when a read splits a UTF-8 character across chunks.
+private struct Utf8Decoder {
+    private var pending = Data()
+
+    mutating func append(_ data: Data) -> String {
+        guard !data.isEmpty else { return "" }
+        pending.append(data)
+        return drain(flush: false)
+    }
+
+    mutating func finish() -> String {
+        drain(flush: true)
+    }
+
+    private mutating func drain(flush: Bool) -> String {
+        guard !pending.isEmpty else { return "" }
+        if let text = String(data: pending, encoding: .utf8) {
+            pending.removeAll(keepingCapacity: true)
+            return text
+        }
+        let limit = min(3, pending.count - 1)
+        if limit > 0 {
+            for hold in 1...limit {
+                let split = pending.count - hold
+                if let text = String(data: pending.prefix(split), encoding: .utf8) {
+                    pending.removeFirst(split)
+                    return text
+                }
+            }
+        }
+        if flush || pending.count > 3 {
+            let keep = flush ? 0 : 3
+            let split = pending.count - keep
+            let text = String(decoding: pending.prefix(split), as: UTF8.self)
+            if keep == 0 {
+                pending.removeAll(keepingCapacity: true)
+            } else {
+                pending.removeFirst(split)
+            }
+            return text
+        }
+        return ""
     }
 }
 

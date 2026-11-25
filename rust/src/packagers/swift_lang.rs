@@ -85,6 +85,7 @@ fn package_build(
         ));
     }
     let mut artifacts = Vec::new();
+    let mut notes = vec!["Native Swift executable.".to_string()];
     let several = binaries.len() > 1;
     for binary in binaries {
         let name = if several {
@@ -92,13 +93,15 @@ fn package_build(
         } else {
             display.to_string()
         };
-        artifacts.extend(product::deliver_binary(&binary, request, &name, log)?);
+        let delivered = product::deliver_binary(&binary, request, &name, log)?;
+        artifacts.extend(delivered.artifacts);
+        notes.extend(delivered.notes);
     }
     Ok(super::outcome(
         Language::Swift,
         artifacts,
         "swift build",
-        vec!["Native Swift executable.".into()],
+        notes,
     ))
 }
 
@@ -138,10 +141,10 @@ fn file_build(
         &[],
         log,
     )?;
-    let artifacts = product::deliver_binary(&binary, request, display, log)?;
-    Ok(super::outcome(
+    let delivered = product::deliver_binary(&binary, request, display, log)?;
+    Ok(super::finish(
         Language::Swift,
-        artifacts,
+        delivered,
         "swiftc",
         vec!["Native Swift executable.".into()],
     ))

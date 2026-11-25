@@ -57,10 +57,10 @@ pub fn build(
         &[],
         log,
     )?;
-    let artifacts = product::deliver_binary(&binary, request, display, log)?;
-    Ok(super::outcome(
+    let delivered = product::deliver_binary(&binary, request, display, log)?;
+    Ok(super::finish(
         Language::Dart,
-        artifacts,
+        delivered,
         "dart",
         vec!["Self-contained Dart executable.".into()],
     ))

@@ -36,13 +36,13 @@ pub fn build(
     let binary = temp.path().join("app");
     let module = detection.project_root.join("go.mod");
     if module.is_file() {
-        let cwd = if detection.entry.is_file() {
+        let cwd = if detection.entry.is_dir() {
+            detection.entry.as_path()
+        } else {
             detection
                 .entry
                 .parent()
                 .unwrap_or(detection.project_root.as_path())
-        } else {
-            detection.project_root.as_path()
         };
         process::run_ok(
             &go,
@@ -71,10 +71,10 @@ pub fn build(
             log,
         )?;
     }
-    let artifacts = product::deliver_binary(&binary, request, display, log)?;
-    Ok(super::outcome(
+    let delivered = product::deliver_binary(&binary, request, display, log)?;
+    Ok(super::finish(
         Language::Go,
-        artifacts,
+        delivered,
         "go",
         vec!["Native executable.".into()],
     ))
